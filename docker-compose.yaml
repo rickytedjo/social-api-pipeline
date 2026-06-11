@@ -1,0 +1,155 @@
+volumes:
+  postgres-coordinator-data:
+    driver: local
+  postgres-worker1-data:
+    driver: local
+  postgres-worker2-data:
+    driver: local
+  kestra-data:
+    driver: local
+
+services:
+  postgres-coordinator:
+    image: citusdata/citus:postgres_17
+    volumes:
+      - postgres-coordinator-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USERNAME}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # --- ADD THESE TWO LINES ---
+      PGUSER: ${POSTGRES_USERNAME}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    command: >
+      postgres
+      -c shared_preload_libraries=citus
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  postgres-worker1:
+    image: citusdata/citus:postgres_17
+    volumes:
+      - postgres-worker1-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USERNAME}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # --- ADD THESE TWO LINES ---
+      PGUSER: ${POSTGRES_USERNAME}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    command: >
+      postgres
+      -c shared_preload_libraries=citus
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  postgres-worker2:
+    image: citusdata/citus:postgres_17
+    volumes:
+      - postgres-worker2-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USERNAME}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # --- ADD THESE TWO LINES ---
+      PGUSER: ${POSTGRES_USERNAME}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    command: >
+      postgres
+      -c shared_preload_libraries=citus
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  citus-setup:
+    image: citusdata/citus:postgres_17
+    depends_on:
+      postgres-coordinator:
+        condition: service_healthy
+      postgres-worker1:
+        condition: service_healthy
+      postgres-worker2:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    entrypoint: >
+      bash -c "
+        psql -h postgres-coordinator -U $POSTGRES_USERNAME -d ${POSTGRES_DB} -c \"SELECT citus_add_node('postgres-worker1', ${POSTGRES_PORT});\" &&
+        psql -h postgres-coordinator -U $POSTGRES_USERNAME -d ${POSTGRES_DB} -c \"SELECT citus_add_node('postgres-worker2', ${POSTGRES_PORT});\" &&
+        psql -h postgres-coordinator -U $POSTGRES_USERNAME -d ${POSTGRES_DB} -c \"SELECT * FROM citus_get_active_worker_nodes();\"
+      "
+    restart: "no"
+
+  kestra:
+    image: kestra/kestra:latest-lts
+    pull_policy: always
+    user: "root"
+    command: server standalone
+    volumes:
+      - kestra-data:/app/storage
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/kestra-wd:/tmp/kestra-wd
+    env_file:
+      - .env
+    environment:
+      KESTRA_CONFIGURATION: |
+        datasources:
+          postgres:
+            url: ${POSTGRES_URL}/${POSTGRES_DB}
+            driverClassName: org.postgresql.Driver
+            username: ${POSTGRES_USERNAME}
+            password: ${POSTGRES_PASSWORD}
+        kestra:
+          repository:
+            type: postgres
+          storage:
+            type: local
+            local:
+              base-path: "/app/storage"
+          queue:
+            type: postgres
+          tasks:
+            tmp-dir:
+              path: /tmp/kestra-wd/tmp
+          url: http://localhost:8080/
+          
+    ports:
+      - "${KESTRA_UI_PORT}:${KESTRA_UI_PORT}"
+      - "${KESTRA_API_PORT}:${KESTRA_API_PORT}"
+    depends_on:
+      postgres-coordinator:
+        condition: service_healthy
+      citus-setup:
+        condition: service_completed_successfully
+
+  pgadmin:
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "${PGADMIN_PORT}:80"
+    depends_on:
+      - postgres-coordinator
+  
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "${GRAFANA_PORT}:${GRAFANA_PORT}"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    depends_on:
+      - postgres-coordinator
+      
+networks:
+  default:
+    name: skripsi_default
+    driver: bridge
