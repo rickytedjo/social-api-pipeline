@@ -1,5 +1,7 @@
 id: boar_944493
 namespace: skripsi.team
+label:
+  name: Social Pipe - AI Agent
 
 variables:
   POSTGRES_USERNAME: ""
@@ -10,42 +12,59 @@ variables:
 inputs:
   - id: question
     type: STRING
-    defaults: "Dari data yang tersedia, informasi apa yang dapat ditentukan terkait harga berbagai komoditas?"
+    defaults: "Dari data yang tersedia, informasi apa yang dapat ditentukan terkait harga dan sentimen terkait berbagai komoditas? Jika tidak ada, nyatakanlah bahwa tidak ada informasi yang dapat digali."
 
 tasks:
 
-  - id: fetch_data
-    type: io.kestra.plugin.jdbc.postgresql.Query # or mysql / sqlserver
+  - id: set_citus_flag
+    type: io.kestra.plugin.jdbc.postgresql.Query
     url: "{{ vars.POSTGRES_URL }}"
     username: "{{ vars.POSTGRES_USERNAME }}"
     password: "{{ vars.POSTGRES_PASSWORD }}"
-    sql: "SELECT * FROM posts WHERE posted_at > now() - interval '30 days'"
+    sql: "SET citus.enable_repartition_joins = true;"
+    fetchType: NONE
+
+  - id: fetch_data
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: "{{ vars.POSTGRES_URL }}"
+    username: "{{ vars.POSTGRES_USERNAME }}"
+    password: "{{ vars.POSTGRES_PASSWORD }}"
+    sql: "SELECT * FROM posts p JOIN users u ON p.user_id = u.id WHERE p.posted_at > now() - interval '30 days';"
     fetch: true
 
   - id: chat
     type: io.kestra.plugin.ai.completion.ChatCompletion
     provider:
       type: io.kestra.plugin.ai.provider.Ollama
-      modelName: llama3-finetuning:latest
+      modelName: llama3.1:8b
       endpoint: "{{ vars.PROVIDER_URL }}"
     messages:
       - type: SYSTEM
         content: |
           You are a business data assistant. Answer questions based 
           on the following database records only.
-          Data: {{ outputs.fetch_data.rows | tojson }}
+          Data: {{ outputs.fetch_data.rows }}
       - type: USER
         content: "{{ inputs.question }}"
-  
+
   - id: log_response
     type: io.kestra.plugin.core.log.Log
     message: |
       === AI Response ===
       Question: {{ inputs.question }}
-      Answer: {{ outputs.chat.text }}
+      Answer: {{ outputs.chat["textOutput"] }}
+
+outputs:
+  - id: result
+    type: JSON
+    value: |
+      {
+        "status": "ok",
+        "result": {{ outputs.chat["textOutput"] | json }}
+      }
 
 triggers:
   - id: webhook_trigger
     type: io.kestra.plugin.core.trigger.Webhook
-    # the required key to start this flow - might be passed as a secret
     key: 
+    wait: true

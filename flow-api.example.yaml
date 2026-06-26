@@ -1,5 +1,8 @@
 id: kangaroo_154430
 namespace: skripsi.team
+label:
+  name: Social Pipe - ETL Pipeline
+
 variables:
   X_BEARER_TOKEN: ""
   BSKY_IDENTIFIER: ""
@@ -29,9 +32,9 @@ tasks:
               values: "{{ inputs.search_topics }}"
               concurrencyLimit: 0
               tasks:
-                - id: x_data
+                - id: x_data # X API doesn't charge for the same repeated calls (https://docs.x.com/x-api/getting-started/pricing#deduplication) 
                   type: io.kestra.plugin.core.http.Request
-                  uri: "https://api.x.com/2/tweets/search/recent?query={{ taskrun.value | urlencode }}&max_results=50&tweet.fields=public_metrics%2Ccreated_at&expansions=author_id"
+                  uri: "https://api.x.com/2/tweets/search/recent?query={{ taskrun.value | urlencode }}&max_results=100&tweet.fields=public_metrics%2Ccreated_at&expansions=author_id"
                   method: GET
                   timeout: PT1M
                   retry:
@@ -54,7 +57,7 @@ tasks:
 
             - id: x_merge
               type: io.kestra.plugin.scripts.python.Commands
-              inputFiles:
+              inputFiles: # Numbers of users_[n] and posts_[n] need to manually set to the amount of keywords
                 merge.py: "{{ read('merge.py') }}"
                 users_0.json: "{{ outputs.x_script[inputs.search_topics[0]].outputFiles['users.json'] }}"
                 posts_0.json: "{{ outputs.x_script[inputs.search_topics[0]].outputFiles['posts.json'] }}"
@@ -71,7 +74,7 @@ tasks:
         - id: bsky_sequence
           type: io.kestra.plugin.core.flow.Sequential
           tasks:
-            - id: get_token
+            - id: get_token # Bearer token is required 
               type: io.kestra.plugin.core.http.Request
               uri: https://bsky.social/xrpc/com.atproto.server.createSession
               method: POST
@@ -122,7 +125,7 @@ tasks:
             
             - id: bsky_merge
               type: io.kestra.plugin.scripts.python.Commands
-              inputFiles:
+              inputFiles: # Numbers of users_[n] and posts_[n] need to manually set to the amount of keywords
                 merge.py: "{{ read('merge.py') }}"
                 users_0.json: "{{ outputs.bsky_script[inputs.search_topics[0]].outputFiles['users.json'] }}"
                 posts_0.json: "{{ outputs.bsky_script[inputs.search_topics[0]].outputFiles['posts.json'] }}"
@@ -136,14 +139,16 @@ tasks:
                 - merged_users.json
                 - merged_posts.json
 
+        # Add here for more api sources
+
   - id: deduplication
     type: io.kestra.plugin.scripts.python.Commands
     inputFiles:
       deduplication.py: "{{ read('deduplication.py') }}"
-      users_x.json: "{{ outputs.x_merge.outputFiles['merged_users.json'] }}"
-      posts_x.json: "{{ outputs.x_merge.outputFiles['merged_posts.json'] }}"
-      users_bsky.json: "{{ outputs.bsky_merge.outputFiles['merged_users.json'] }}"
-      posts_bsky.json: "{{ outputs.bsky_merge.outputFiles['merged_posts.json'] }}"
+      users_x.json: "{{ outputs.x_merge.outputFiles['merged_users.json'] | default('')}}"
+      posts_x.json: "{{ outputs.x_merge.outputFiles['merged_posts.json'] | default ('') }}"
+      users_bsky.json: "{{ outputs.bsky_merge.outputFiles['merged_users.json'] | default('') }}"
+      posts_bsky.json: "{{ outputs.bsky_merge.outputFiles['merged_posts.json'] | default('') }}"
     commands:
       - python deduplication.py
     outputFiles:
@@ -161,7 +166,7 @@ tasks:
         sql: |
           CREATE TABLE IF NOT EXISTS users (
             id BIGSERIAL,
-            ext_id TEXT NOT NULL,
+            ext_id TEXT NOT NULL UNIQUE,
             username VARCHAR NOT NULL,
             display_name TEXT NOT NULL,
             platform TEXT NOT NULL,
@@ -181,7 +186,7 @@ tasks:
             id BIGSERIAL,
             title VARCHAR,
             body TEXT,
-            posts_hash TEXT,
+            posts_hash TEXT UNIQUE,
             user_id BIGINT NOT NULL,
             likes INTEGER,
             posted_at TIMESTAMP,
@@ -258,3 +263,15 @@ tasks:
           - pip install psycopg2-binary -q
         commands:
           - python db_insert.py
+
+  - id: log_response
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Process succeeded!
+
+triggers:
+  - id: webhook_trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    # the required key to start this flow - might be passed as a secret
+    key: 
+    wait: true

@@ -5,12 +5,28 @@ all_users = []
 all_posts = []
 
 for filepath in sorted(glob.glob("users_*.json")):
+  try:
     with open(filepath) as f:
-        all_users.extend(json.load(f))
+            content = f.read().strip()
+            if not content:
+                print(f"Skipping empty {filepath}")
+                continue
+            all_users.extend(json.loads(content))
+
+  except Exception as e:
+    print(f"Skipping {filepath}: {e}")
 
 for filepath in sorted(glob.glob("posts_*.json")):
+  try:
     with open(filepath) as f:
-        all_posts.extend(json.load(f))
+            content = f.read().strip()
+            if not content:
+                print(f"Skipping empty {filepath}")
+                continue
+            all_posts.extend(json.loads(content))
+            
+  except Exception as e:
+    print(f"Skipping {filepath}: {e}")
 
 print(f"Loaded {len(all_users)} users, {len(all_posts)} posts before dedup")
 
