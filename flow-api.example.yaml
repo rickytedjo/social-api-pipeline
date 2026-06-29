@@ -18,143 +18,104 @@ inputs:
   - id: search_topics
     itemType: STRING
     type: ARRAY
-    defaults: ["harga bawang", "harga cabai", "harga beras"]
+    defaults:
+      [
+        "harga bawang",
+        "harga cabai",
+        "harga beras",
+        "harga sayur",
+        "harga santan",
+        "harga daging",
+      ]
 
 tasks:
   - id: parallel_extraction
     type: io.kestra.plugin.core.flow.Parallel
     tasks:
-        - id: x_sequence
-          type: io.kestra.plugin.core.flow.Sequential
-          tasks:
-            - id: x_foreach
-              type: io.kestra.plugin.core.flow.ForEach
-              values: "{{ inputs.search_topics }}"
-              concurrencyLimit: 0
-              tasks:
-                - id: x_data # X API doesn't charge for the same repeated calls (https://docs.x.com/x-api/getting-started/pricing#deduplication) 
-                  type: io.kestra.plugin.core.http.Request
-                  uri: "https://api.x.com/2/tweets/search/recent?query={{ taskrun.value | urlencode }}&max_results=100&tweet.fields=public_metrics%2Ccreated_at&expansions=author_id"
-                  method: GET
-                  timeout: PT1M
-                  retry:
-                    type: exponential
-                    interval: PT5S
-                    maxInterval: PT60S
-                    delayFactor: 2.0
-                  headers:
-                    Authorization: "Bearer {{ vars.X_BEARER_TOKEN }}"
-                - id: x_script
-                  type: io.kestra.plugin.scripts.python.Commands # Changed from Script to Commands
-                  inputFiles:
-                    data.json: "{{ outputs.x_data[taskrun.value].body }}"
-                    xapi.py: "{{ read('xapi.py') }}"
-                  commands: # Changed from script to commands
-                    - python xapi.py
-                  outputFiles:
-                    - users.json
-                    - posts.json
+      - id: x_sequence
+        type: io.kestra.plugin.core.flow.Sequential
+        allowFailure: true
+        tasks:
+          - id: x_extract
+            type: io.kestra.plugin.scripts.python.Commands
+            allowFailure: true
+            taskRunner:
+              type: io.kestra.plugin.scripts.runner.docker.Docker
+              networkMode: skripsi_default
+            containerImage: python:3.13-slim
+            inputFiles:
+              xapi.py: "{{ read('xapi.py') }}"
+              config.json: |
+                {
+                  "topics": {{ inputs.search_topics | json }},
+                  "bearer_token": "{{ vars.X_BEARER_TOKEN }}",
+                  "max_results": 50
+                }
+            commands:
+              - python xapi.py
+            outputFiles:
+              - users.json
+              - posts.json
 
-            - id: x_merge
-              type: io.kestra.plugin.scripts.python.Commands
-              inputFiles: # Numbers of users_[n] and posts_[n] need to manually set to the amount of keywords
-                merge.py: "{{ read('merge.py') }}"
-                users_0.json: "{{ outputs.x_script[inputs.search_topics[0]].outputFiles['users.json'] }}"
-                posts_0.json: "{{ outputs.x_script[inputs.search_topics[0]].outputFiles['posts.json'] }}"
-                users_1.json: "{{ outputs.x_script[inputs.search_topics[1]].outputFiles['users.json'] }}"
-                posts_1.json: "{{ outputs.x_script[inputs.search_topics[1]].outputFiles['posts.json'] }}"
-                users_2.json: "{{ outputs.x_script[inputs.search_topics[2]].outputFiles['users.json'] }}"
-                posts_2.json: "{{ outputs.x_script[inputs.search_topics[2]].outputFiles['posts.json'] }}"
-              commands:
-                - python merge.py
-              outputFiles:
-                - merged_users.json
-                - merged_posts.json
+      - id: bsky_sequence
+        type: io.kestra.plugin.core.flow.Sequential
+        allowFailure: true
+        tasks:
+          - id: get_token # Bearer token is required
+            type: io.kestra.plugin.core.http.Request
+            uri: https://bsky.social/xrpc/com.atproto.server.createSession
+            method: POST
+            contentType: application/json
+            body: |
+              {{ {
+                "identifier" : vars.BSKY_IDENTIFIER,
+                "password" : vars.BSKY_PASSWORD
+              } }}
 
-        - id: bsky_sequence
-          type: io.kestra.plugin.core.flow.Sequential
-          tasks:
-            - id: get_token # Bearer token is required 
-              type: io.kestra.plugin.core.http.Request
-              uri: https://bsky.social/xrpc/com.atproto.server.createSession
-              method: POST
-              contentType: application/json
-              body: | 
-                {{ {
-                  "identifier" : vars.BSKY_IDENTIFIER,
-                  "password" : vars.BSKY_PASSWORD
-                } }}
-          
-            - id: set_variable
-              type: io.kestra.plugin.core.kv.Set
-              key: accessJwt
-              value: "{{outputs.get_token.body | jq('.accessJwt') | first }}"
-              kvType: STRING
+          - id: set_variable
+            type: io.kestra.plugin.core.kv.Set
+            key: accessJwt
+            value: "{{outputs.get_token.body | jq('.accessJwt') | first }}"
+            kvType: STRING
 
-            - id: print_token
-              type: io.kestra.plugin.core.log.Log
-              message: "Bearer {{kv('accessJwt')}}"
-          
-            - id: bsky_foreach
-              type: io.kestra.plugin.core.flow.ForEach
-              values: "{{ inputs.search_topics }}"
-              concurrencyLimit: 0
-              tasks:
-                - id: bsky_data
-                  type: io.kestra.plugin.core.http.Request
-                  uri: "https://bsky.social/xrpc/app.bsky.feed.searchPosts?q={{ taskrun.value | urlencode }}&limit=100"
-                  method: GET
-                  timeout: PT1M
-                  retry:
-                    type: exponential
-                    interval: PT5S
-                    maxInterval: PT60S
-                    delayFactor: 2.0
-                  headers:
-                    Authorization: "Bearer {{kv('accessJwt')}}"
-                - id: bsky_script
-                  type: io.kestra.plugin.scripts.python.Commands # Changed from Script to Commands
-                  inputFiles:
-                    data.json: "{{ outputs.bsky_data[taskrun.value].body }}"
-                    bskyapi.py: "{{ read('bskyapi.py') }}"
-                  commands: # Changed from script to commands
-                    - python bskyapi.py
-                  outputFiles:
-                    - users.json
-                    - posts.json
-            
-            - id: bsky_merge
-              type: io.kestra.plugin.scripts.python.Commands
-              inputFiles: # Numbers of users_[n] and posts_[n] need to manually set to the amount of keywords
-                merge.py: "{{ read('merge.py') }}"
-                users_0.json: "{{ outputs.bsky_script[inputs.search_topics[0]].outputFiles['users.json'] }}"
-                posts_0.json: "{{ outputs.bsky_script[inputs.search_topics[0]].outputFiles['posts.json'] }}"
-                users_1.json: "{{ outputs.bsky_script[inputs.search_topics[1]].outputFiles['users.json'] }}"
-                posts_1.json: "{{ outputs.bsky_script[inputs.search_topics[1]].outputFiles['posts.json'] }}"
-                users_2.json: "{{ outputs.bsky_script[inputs.search_topics[2]].outputFiles['users.json'] }}"
-                posts_2.json: "{{ outputs.bsky_script[inputs.search_topics[2]].outputFiles['posts.json'] }}"
-              commands:
-                - python merge.py
-              outputFiles:
-                - merged_users.json
-                - merged_posts.json
+          - id: bsky_extract
+            type: io.kestra.plugin.scripts.python.Commands
+            allowFailure: true
+            taskRunner:
+              type: io.kestra.plugin.scripts.runner.docker.Docker
+              networkMode: skripsi_default
+            containerImage: python:3.13-slim
+            inputFiles:
+              bskyapi.py: "{{ read('bskyapi.py') }}"
+              config.json: |
+                {
+                  "topics": {{ inputs.search_topics | json }},
+                  "max_results": 100,
+                  "bearer": "Bearer {{kv('accessJwt')}}"
+                }
+            commands:
+              - python bskyapi.py
+            outputFiles:
+              - users.json
+              - posts.json
 
-        # Add here for more api sources
+      # Add here for more api sources
 
   - id: deduplication
     type: io.kestra.plugin.scripts.python.Commands
+    containerImage: python:3.13-slim
     inputFiles:
       deduplication.py: "{{ read('deduplication.py') }}"
-      users_x.json: "{{ outputs.x_merge.outputFiles['merged_users.json'] | default('')}}"
-      posts_x.json: "{{ outputs.x_merge.outputFiles['merged_posts.json'] | default ('') }}"
-      users_bsky.json: "{{ outputs.bsky_merge.outputFiles['merged_users.json'] | default('') }}"
-      posts_bsky.json: "{{ outputs.bsky_merge.outputFiles['merged_posts.json'] | default('') }}"
+      users_x.json: "{{ outputs.x_extract.outputFiles['users.json'] | default('') }}"
+      posts_x.json: "{{ outputs.x_extract.outputFiles['posts.json'] | default('') }}"
+      users_bsky.json: "{{ outputs.bsky_extract.outputFiles['users.json'] | default('') }}"
+      posts_bsky.json: "{{ outputs.bsky_extract.outputFiles['posts.json'] | default('') }}"
     commands:
       - python deduplication.py
     outputFiles:
       - unique_users.json
       - unique_posts.json
-  
+
   - id: db_operation
     type: io.kestra.plugin.core.flow.Sequential
     tasks:
@@ -172,7 +133,7 @@ tasks:
             platform TEXT NOT NULL,
             PRIMARY KEY (id, ext_id)
           );
-          
+
           DO $$
           BEGIN
             IF NOT EXISTS (
@@ -273,5 +234,5 @@ triggers:
   - id: webhook_trigger
     type: io.kestra.plugin.core.trigger.Webhook
     # the required key to start this flow - might be passed as a secret
-    key: 
+    key:
     wait: true
