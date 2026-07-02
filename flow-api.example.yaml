@@ -131,7 +131,7 @@ tasks:
             username VARCHAR NOT NULL,
             display_name TEXT NOT NULL,
             platform TEXT NOT NULL,
-            PRIMARY KEY (id, ext_id)
+            PRIMARY KEY (id)
           );
 
           DO $$
@@ -139,7 +139,7 @@ tasks:
             IF NOT EXISTS (
               SELECT 1 FROM citus_tables WHERE table_name = 'users'::regclass
             ) THEN
-              PERFORM create_distributed_table('users', 'ext_id');
+              PERFORM create_reference_table('users');
             END IF;
           END $$;
 
